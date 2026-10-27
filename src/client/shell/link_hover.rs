@@ -1,7 +1,7 @@
 use super::*;
 use crate::api::schema::{PaneLinkActivateParams, PaneLinkRegion};
 use crate::protocol::SurfaceRect;
-use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{MouseEvent, MouseEventKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct LinkHoverTarget {
@@ -79,10 +79,7 @@ impl ClientShellState {
     }
 
     pub(super) fn update_link_hover(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
-        if mouse.kind != MouseEventKind::Moved
-            || !mouse.modifiers.contains(KeyModifiers::CONTROL)
-            || !self.link_hover_allowed()
-        {
+        if mouse.kind != MouseEventKind::Moved || !self.link_hover_allowed() {
             outcome.repaint |= self.clear_link_hover();
             return;
         }
@@ -357,7 +354,12 @@ impl ClientShellState {
                     .cells
                     .get_mut(usize::from(row) * usize::from(frame.width) + usize::from(col))
                 {
-                    cell.modifier |= Modifier::UNDERLINED.bits();
+                    // Replace the composed cell's underline style, not the pane's original style.
+                    cell.modifier = crate::protocol::modifier_with_underline_style(
+                        Modifier::from_bits_truncate(cell.modifier) | Modifier::UNDERLINED,
+                        3,
+                    )
+                    .bits();
                 }
             }
         }

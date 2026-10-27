@@ -57,6 +57,133 @@ fn resolve_hover(state: &mut ClientShellState, id: &str) -> bool {
 }
 
 #[test]
+fn ordinary_hover_waves_named_link_and_restores_its_original_style() {
+    for style in 0..=5 {
+        for modifiers in [
+            KeyModifiers::empty(),
+            KeyModifiers::CONTROL,
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+        ] {
+            assert_named_link_hover(style, modifiers);
+        }
+    }
+}
+
+fn assert_named_link_hover(style: u8, modifiers: KeyModifiers) {
+    let mut state = hover_state();
+    let mut next = surface();
+    next.surface_revision += 1;
+    next.frame.hyperlinks.push("https://example.com/".into());
+    for cell in &mut next.frame.cells[1..4] {
+        cell.hyperlink = Some(0);
+        cell.modifier = crate::protocol::modifier_with_underline_style(
+            Modifier::UNDERLINED | Modifier::BOLD | Modifier::ITALIC,
+            style,
+        )
+        .bits();
+        cell.fg = crate::protocol::color_to_u32(ratatui::style::Color::Magenta);
+    }
+    let original = next.frame.cells.clone();
+    state.set_pane_surface(next);
+    let baseline = state.compose(106, 20).unwrap();
+    let mouse = MouseEvent {
+        modifiers,
+        ..hover_mouse(&state, 2, 0)
+    };
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    assert!(outcome.repaint);
+    assert!(outcome.actions.is_empty(), "explicit links resolve locally");
+    let frame = state.compose(106, 20).unwrap();
+    let pane = &state.hits.panes[0];
+    for col in 1..4 {
+        let index = usize::from(pane.inner_rect.y) * usize::from(frame.width)
+            + usize::from(pane.inner_rect.x + col);
+        assert_eq!(
+            crate::protocol::underline_style_from_modifier(frame.cells[index].modifier),
+            3
+        );
+        assert_eq!(frame.cells[index].fg, baseline.cells[index].fg);
+        assert_ne!(frame.cells[index].modifier & Modifier::UNDERLINED.bits(), 0);
+        assert_eq!(
+            Modifier::from_bits_truncate(frame.cells[index].modifier),
+            Modifier::UNDERLINED | Modifier::BOLD | Modifier::ITALIC
+        );
+    }
+    assert_eq!(state.pane_surface.as_ref().unwrap().frame.cells, original);
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        column: 0,
+        row: 0,
+        ..mouse
+    })]);
+    assert!(outcome.repaint);
+    assert_eq!(state.compose(106, 20).unwrap().cells, baseline.cells);
+}
+
+#[test]
+fn ordinary_hover_waves_visible_urls_with_or_without_osc8() {
+    for explicit in [false, true] {
+        let mut state = hover_state();
+        let mut next = surface();
+        next.surface_revision += 1;
+        let url = "https://example.com";
+        next.frame = FrameData::from_ratatui_buffer(&Buffer::with_lines([url]), None);
+        next.panes[0].inner_rect.width = next.frame.width;
+        next.panes[0].inner_rect.height = 1;
+        next.panes[0].rect = next.panes[0].inner_rect;
+        if explicit {
+            next.frame.hyperlinks.push(url.into());
+            for cell in &mut next.frame.cells {
+                cell.hyperlink = Some(0);
+            }
+        }
+        state.set_pane_surface(next);
+        let baseline = state.compose(106, 20).unwrap();
+        let mouse = MouseEvent {
+            modifiers: KeyModifiers::empty(),
+            ..hover_mouse(&state, 2, 0)
+        };
+        let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        if explicit {
+            assert!(outcome.actions.is_empty());
+            assert!(outcome.repaint);
+        } else {
+            let id = hover_request(&outcome);
+            let (repaint, actions) = state.handle_endpoint_result(
+                "boot-1",
+                &id,
+                Ok(crate::api::schema::ResponseResult::PaneLinkResolved {
+                    regions: vec![crate::api::schema::PaneLinkRegion {
+                        row: 0,
+                        start_col: 0,
+                        end_col: url.len() as u16 - 1,
+                    }],
+                }),
+            );
+            assert!(repaint);
+            assert!(actions.is_empty(), "hover must not activate a link");
+        }
+        let frame = state.compose(106, 20).unwrap();
+        let pane = &state.hits.panes[0];
+        for col in 0..url.len() as u16 {
+            let index = usize::from(pane.inner_rect.y) * usize::from(frame.width)
+                + usize::from(pane.inner_rect.x + col);
+            assert_eq!(
+                crate::protocol::underline_style_from_modifier(frame.cells[index].modifier),
+                3
+            );
+            assert_ne!(frame.cells[index].modifier & Modifier::UNDERLINED.bits(), 0);
+        }
+        state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            column: 0,
+            row: 0,
+            ..mouse
+        })]);
+        assert_eq!(state.compose(106, 20).unwrap().cells, baseline.cells);
+    }
+}
+
+#[test]
 fn ctrl_hover_underlines_wrapped_segments_and_caches_the_link() {
     let mut state = hover_state();
     let mouse = hover_mouse(&state, 1, 0);
@@ -151,7 +278,7 @@ fn ctrl_hover_coalesces_motion_and_ignores_old_replies() {
 }
 
 #[test]
-fn ctrl_hover_clears_on_release_content_change_and_focus_loss() {
+fn ctrl_hover_clears_on_pointer_exit_content_change_focus_loss_and_key_release() {
     for clear in 0..4 {
         let mut state = hover_state();
         let mouse = hover_mouse(&state, 1, 0);
@@ -160,7 +287,8 @@ fn ctrl_hover_clears_on_release_content_change_and_focus_loss() {
         match clear {
             0 => {
                 state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
-                    modifiers: KeyModifiers::empty(),
+                    column: 0,
+                    row: 0,
                     ..mouse
                 })]);
             }
@@ -281,7 +409,10 @@ fn ctrl_hover_ignores_late_reply_after_pointer_leaves() {
     let id = hover_request(&state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]));
     state.config.mouse_capture = false;
     assert!(!resolve_hover(&mut state, &id));
-    let ignored = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    let ignored = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        modifiers: KeyModifiers::empty(),
+        ..mouse
+    })]);
     assert!(
         ignored.actions.is_empty(),
         "native links must not request Herdr hover"

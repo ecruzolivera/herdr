@@ -73,7 +73,10 @@ fn selection_release_copies_latest_position_before_deferred_paint() {
 fn ctrl_click_routes_link_activation_through_endpoint_then_client_host() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
-    state.set_pane_surface(surface());
+    let mut linked = surface();
+    linked.frame.hyperlinks.push("https://example.test".into());
+    linked.frame.cells[6].hyperlink = Some(0);
+    state.set_pane_surface(linked);
     state.compose(106, 20).expect("pane frame");
     let pane = state.hits.panes[0].clone();
     let down = MouseEvent {
@@ -82,6 +85,13 @@ fn ctrl_click_routes_link_activation_through_endpoint_then_client_host() {
         row: pane.inner_rect.y + 1,
         modifiers: KeyModifiers::CONTROL,
     };
+    let hover = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        modifiers: KeyModifiers::empty(),
+        ..down
+    })]);
+    assert!(hover.repaint);
+    assert!(hover.actions.is_empty(), "hover must not activate the link");
     let activate = state.handle_raw_events(vec![RawInputEvent::Mouse(down)]);
     let [ClientShellAction::Endpoint { request, .. }] = &activate.actions[..] else {
         panic!("expected link activation request");
